@@ -4,6 +4,7 @@ import SnakeKit
 struct GameView: View {
     let state: GameState
     @State private var clock = GameClock()
+    @State private var monitor: Any?
 
     var body: some View {
         // TimelineView перерисовывает канвас каждый кадр — канвас сам по себе
@@ -16,10 +17,49 @@ struct GameView: View {
         .background(Color.black)
         .onAppear {
             clock.start(state: state)
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // Монитор срабатывает на главном потоке; Swift 6 требует явного
+                // входа в MainActor-контекст из non-isolated-замыкания, а его
+                // @Sendable-тело не может захватить non-Sendable NSEvent —
+                // передаём только keyCode.
+                let code = Int(event.keyCode)
+                let consumed = MainActor.assumeIsolated {
+                    handleKey(code: code)
+                }
+                return consumed ? nil : event
+            }
         }
         .onDisappear {
             clock.stop()
+            if let m = monitor {
+                NSEvent.removeMonitor(m)
+            }
+            monitor = nil
         }
+    }
+
+    /// Правила ввода: true = ключ съеден (ни системного бипа, ни прохода дальше).
+    /// При game over: Enter/space → рестарт. В игре: направление → буфер, space → пауза.
+    /// Остальные коды не глотаются.
+    @MainActor
+    private func handleKey(code: Int) -> Bool {
+        if state.isGameOver {
+            if code == InputMapping.restartKeyCode || code == InputMapping.pauseKeyCode {
+                state.startNewGame()
+                clock.start(state: state)
+                return true
+            }
+            return false
+        }
+        if code == InputMapping.pauseKeyCode {
+            state.togglePause()
+            return true
+        }
+        if let d = InputMapping.direction(forKeyCode: code) {
+            state.enqueueTurn(d)
+            return true
+        }
+        return false
     }
 
     /// Размер клетки: min(W, H − HUD) / размер доски. HUD = 40 pt сверху.
